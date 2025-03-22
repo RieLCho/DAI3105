@@ -49,6 +49,17 @@ class ECAPA_TDNN(nn.Module):
     def __init__(self, input_size=80, channels=512, emb_dim=192):
         super(ECAPA_TDNN, self).__init__()
         
+        # Mel-spectrogram 특징 추출기
+        self.feature_extractor = torchaudio.transforms.MelSpectrogram(
+            sample_rate=16000,
+            n_fft=512,
+            win_length=400,
+            hop_length=160,
+            f_min=20,
+            f_max=7600,
+            n_mels=input_size
+        )
+        
         self.conv1 = nn.Conv1d(input_size, channels, kernel_size=5, stride=1, padding=2)
         self.relu = nn.ReLU()
         self.bn1 = nn.BatchNorm1d(channels)
@@ -74,6 +85,13 @@ class ECAPA_TDNN(nn.Module):
         self.embedding = nn.Linear(3*channels, emb_dim)
         
     def forward(self, x):
+        # Mel-spectrogram 특징 추출
+        with torch.no_grad():
+            if x.dim() == 3:  # [batch_size, channels, time]
+                x = x.squeeze(1)  # [batch_size, time]
+            x = self.feature_extractor(x)  # [batch_size, n_mels, time]
+            x = x.clamp(min=1e-10).log()   # Log-Mel spectrogram
+        
         x = self.conv1(x)
         x = self.relu(x)
         x = self.bn1(x)
@@ -100,16 +118,20 @@ class VoiceEncoder:
         self.model.eval()
         
         # MFCC 특징 추출기 초기화
-        self.feature_extractor = torchaudio.transforms.MFCC(
+        self.feature_extractor = torchaudio.transforms.MelSpectrogram(
             sample_rate=16000,
-            n_mfcc=80,
-            melkwargs={'n_fft': 512, 'hop_length': 160}
+            n_fft=512,
+            win_length=400,
+            hop_length=160,
+            f_min=20,
+            f_max=7600,
+            n_mels=80
         )
         
     @torch.no_grad()
     def encode_voice(self, audio_data: torch.Tensor) -> torch.Tensor:
         """음성 데이터를 임베딩 벡터로 변환합니다."""
-        # MFCC 특징 추출
+        # Mel-spectrogram 특징 추출
         features = self.feature_extractor(audio_data)
         features = features.unsqueeze(0).to(self.device)
         
