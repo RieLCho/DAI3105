@@ -19,12 +19,11 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.model
 
 # Virtual Environment
-.env
-.venv
-env/
-venv/
+.venv/
+.env/
 ENV/
 
 # IDE
@@ -38,7 +37,21 @@ ENV/
 Thumbs.db
 
 # Project specific
+data/librispeech/
+models/
+model_weights/
+*.pth
 *.wav
 *.mp3
-*.model
-model_weights/ 
+*.flac
+*.m4a
+*.ogg
+*.pkl
+*.npy
+*.npz
+*.csv
+*.json
+*.log
+*.txt
+!requirements.txt
+!README.md 

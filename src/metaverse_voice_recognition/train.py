@@ -2,15 +2,17 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from typing import Optional, Tuple
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
+import torchaudio
 
 from metaverse_voice_recognition.dataset import VoxCelebDataset
 from metaverse_voice_recognition.ecapa_tdnn import ECAPA_TDNN
 from metaverse_voice_recognition.config import ModelConfig, TrainingConfig
+from .model import SpeakerNet
 
 def count_parameters(model: nn.Module) -> int:
     """모델의 학습 가능한 파라미터 수를 반환합니다."""
@@ -196,6 +198,30 @@ def validate(
     
     return val_loss, val_acc
 
+class AudioDataset(Dataset):
+    def __init__(self, data_dir):
+        self.data_dir = Path(data_dir)
+        self.files = []
+        self.labels = {}
+        label_idx = 0
+        
+        # 데이터 디렉토리 탐색
+        for speaker_dir in self.data_dir.iterdir():
+            if speaker_dir.is_dir():
+                self.labels[speaker_dir.name] = label_idx
+                for wav_file in speaker_dir.glob("*.wav"):
+                    self.files.append(wav_file)
+                label_idx += 1
+        
+    def __len__(self):
+        return len(self.files)
+    
+    def __getitem__(self, idx):
+        file_path = self.files[idx]
+        waveform, sample_rate = torchaudio.load(file_path)
+        label = self.labels[file_path.parent.name]
+        return waveform, label
+
 def train_model(config: TrainingConfig) -> ECAPA_TDNN:
     """ECAPA-TDNN 모델을 학습합니다."""
     # 장치 설정
@@ -203,103 +229,90 @@ def train_model(config: TrainingConfig) -> ECAPA_TDNN:
     print(f'Using device: {device}')
     
     # 데이터셋 및 데이터로더 생성
-    train_dataset = VoxCelebDataset(config.train_dir, augment=config.augment)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        collate_fn=VoxCelebDataset.collate_fn
-    )
+    train_dataset = AudioDataset(config.train_dir)
+    val_dataset = AudioDataset(config.val_dir)
     
-    if config.val_dir:
-        val_dataset = VoxCelebDataset(config.val_dir, augment=False)
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            num_workers=config.num_workers,
-            collate_fn=VoxCelebDataset.collate_fn
-        )
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
     
     # 모델 초기화
-    model = ECAPA_TDNN().to(device)
-    print(f'모델 파라미터 수: {count_parameters(model):,}')
+    model = SpeakerNet(num_classes=len(train_dataset.labels)).to(device)
+    print(f'모델 파라미터 수: {sum(p.numel() for p in model.parameters()):,}')
     
     # 손실 함수, 옵티마이저 초기화
-    criterion = AAMSoftmax(
-        embedding_dim=192,
-        num_speakers=len(train_dataset.speakers),
-        margin=config.margin,
-        scale=config.scale
-    ).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters())
     
-    optimizer = optim.Adam(
-        list(model.parameters()) + list(criterion.parameters()),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay
-    )
-    
-    scheduler = optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=config.scheduler_step_size,
-        gamma=config.scheduler_gamma
-    )
-    
-    # 체크포인트 디렉토리 생성
-    save_dir = Path(config.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    best_val_acc = 0.0
+    # Early stopping 설정
+    best_val_loss = float('inf')
+    patience = 5
     patience_counter = 0
     
     print("\n학습 시작...")
+    
     for epoch in range(config.num_epochs):
+        print(f"\n\nEpoch {epoch + 1}/{config.num_epochs}")
+        
         # 학습
-        train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, device,
-            epoch + 1, config.num_epochs
-        )
-        print(f'\nEpoch {epoch+1}/{config.num_epochs}')
-        print(f'Training Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%')
+        model.train()
+        train_loss = 0
+        correct = 0
+        total = 0
+        
+        for waveforms, labels in train_loader:
+            waveforms, labels = waveforms.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(waveforms)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+        
+        train_loss = train_loss / len(train_loader)
+        train_acc = 100. * correct / total
         
         # 검증
-        if config.val_dir and (epoch + 1) % config.val_interval == 0:
-            val_loss, val_acc = validate(
-                model, val_loader, criterion, device,
-                epoch + 1, config.num_epochs
-            )
-            print(f'Validation Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%')
-            
-            # 조기 종료 확인
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                patience_counter = 0
+        model.eval()
+        val_loss = 0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for waveforms, labels in val_loader:
+                waveforms, labels = waveforms.to(device), labels.to(device)
+                outputs = model(waveforms)
+                loss = criterion(outputs, labels)
                 
-                # 최고 성능 모델 저장
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'val_acc': val_acc,
-                }, save_dir / 'best_model.pth')
-            else:
-                patience_counter += 1
-                if patience_counter >= config.early_stopping_patience:
-                    print(f'\n{config.early_stopping_patience}번 동안 성능 향상이 없어 학습을 조기 종료합니다.')
-                    break
+                val_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += labels.size(0)
+                correct += predicted.eq(labels).sum().item()
         
-        # 학습률 조정
-        scheduler.step()
+        val_loss = val_loss / len(val_loader)
+        val_acc = 100. * correct / total
         
-        # 주기적으로 모델 저장
-        if (epoch + 1) % config.save_interval == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_acc': train_acc,
-            }, save_dir / f'model_epoch_{epoch+1}.pth')
+        print(f"Training Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
+        print(f"Validation Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            
+            # 모델 저장
+            os.makedirs(config.save_dir, exist_ok=True)
+            torch.save(model.state_dict(), os.path.join(config.save_dir, 'best_model.pth'))
+            
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"\n{patience}번 동안 성능 향상이 없어 학습을 조기 종료합니다.")
+                break
     
     print("\n학습 완료!")
     return model
