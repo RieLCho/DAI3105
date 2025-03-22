@@ -89,8 +89,17 @@ class ECAPA_TDNN(nn.Module):
         with torch.no_grad():
             if x.dim() == 3:  # [batch_size, channels, time]
                 x = x.squeeze(1)  # [batch_size, time]
+            elif x.dim() == 2:  # [channels, time]
+                x = x.unsqueeze(0)  # [1, time]
+            elif x.dim() == 1:  # [time]
+                x = x.unsqueeze(0)  # [1, time]
+            
             x = self.feature_extractor(x)  # [batch_size, n_mels, time]
             x = x.clamp(min=1e-10).log()   # Log-Mel spectrogram
+            
+            # 차원 순서 변경: [batch_size, n_mels, time]
+            if x.dim() == 4:  # [batch_size, 1, n_mels, time]
+                x = x.squeeze(1)
         
         x = self.conv1(x)
         x = self.relu(x)
@@ -131,12 +140,8 @@ class VoiceEncoder:
     @torch.no_grad()
     def encode_voice(self, audio_data: torch.Tensor) -> torch.Tensor:
         """음성 데이터를 임베딩 벡터로 변환합니다."""
-        # Mel-spectrogram 특징 추출
-        features = self.feature_extractor(audio_data)
-        features = features.unsqueeze(0).to(self.device)
-        
-        # 임베딩 생성
-        embedding = self.model(features)
+        audio_data = audio_data.to(self.device)
+        embedding = self.model(audio_data)
         return embedding
         
     def compute_similarity(self, emb1: torch.Tensor, emb2: torch.Tensor) -> float:
