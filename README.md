@@ -1,88 +1,77 @@
-# Metaverse Voice Recognition
+# 메타버스 음성 인식 시스템
 
-메타버스 환경에서 사용할 수 있는 화자 인식 시스템입니다. ECAPA-TDNN 모델을 사용하여 화자의 목소리를 식별합니다.
+화자 인식을 위한 간단한 음성 인식 시스템입니다.
 
 ## 설치 방법
 
-1. Python 3.8 이상이 필요합니다.
-2. 가상환경을 생성하고 활성화합니다:
+1. 가상환경 생성 및 활성화:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# 또는
-.venv\Scripts\activate  # Windows
+source .venv/bin/activate  # macOS/Linux
 ```
 
-3. 필요한 패키지를 설치합니다:
+2. 필요한 패키지 설치 (uv 사용):
 
 ```bash
-pip install torch torchaudio numpy tqdm
+uv pip install torch torchaudio numpy tqdm soundfile
 ```
 
-## 사용 방법
+## 실행 방법
 
-### 1. 샘플 데이터셋 생성
+### 1. main.py 사용 (권장)
 
-테스트를 위한 샘플 데이터셋을 생성합니다:
+모든 기능을 한 번에 실행하거나 개별적으로 실행할 수 있습니다:
 
 ```bash
-python -m src.metaverse_voice_recognition.generate_sample_dataset \
-    --output_dir sample_datasets \
-    --num_speakers 5 \
-    --samples_per_speaker 10 \
-    --duration 3.0
+# 전체 과정 실행 (데이터셋 생성 + 학습 + 테스트)
+python -m metaverse_voice_recognition.main --mode all
+
+# 데이터셋만 생성
+python -m metaverse_voice_recognition.main --mode generate
+
+# 모델만 학습
+python -m metaverse_voice_recognition.main --mode train
+
+# 모델만 테스트
+python -m metaverse_voice_recognition.main --mode test
 ```
 
-### 2. 모델 학습
+### 2. 개별 모듈 실행
 
-생성된 샘플 데이터셋으로 모델을 학습합니다:
+각 기능을 개별적으로 실행할 수도 있습니다:
 
 ```bash
-PYTHONPATH=src python src/metaverse_voice_recognition/train.py \
-    --train_dir sample_datasets/train \
-    --val_dir sample_datasets/test \
-    --num_epochs 10 \
-    --batch_size 4 \
-    --learning_rate 0.001
+# 샘플 데이터셋 생성
+python -m metaverse_voice_recognition.generate_sample_dataset --output_dir data/sample_dataset --num_speakers 5 --samples_per_speaker 10
+
+# 모델 학습
+python -m metaverse_voice_recognition.train --train_dir data/sample_dataset --val_dir data/sample_dataset --num_epochs 5 --batch_size 16 --save_dir models
+
+# 모델 테스트
+python -m metaverse_voice_recognition.test --model_path models/best_model.pth --test_dir data/sample_dataset
 ```
-
-### 주요 매개변수
-
-#### 샘플 데이터셋 생성
-
-- `--output_dir`: 데이터셋이 저장될 디렉토리
-- `--num_speakers`: 생성할 화자 수
-- `--samples_per_speaker`: 화자당 생성할 샘플 수
-- `--duration`: 각 음성 샘플의 길이(초)
-
-#### 모델 학습
-
-- `--train_dir`: 학습 데이터 디렉토리
-- `--val_dir`: 검증 데이터 디렉토리
-- `--num_epochs`: 학습 에폭 수
-- `--batch_size`: 배치 크기
-- `--learning_rate`: 학습률
-- `--save_dir`: 모델이 저장될 디렉토리 (기본값: 'models')
 
 ## 프로젝트 구조
 
 ```
 metaverse/
-├── src/
-│   └── metaverse_voice_recognition/
-│       ├── train.py              # 모델 학습 스크립트
-│       ├── generate_sample_dataset.py  # 샘플 데이터셋 생성
-│       ├── download_voxceleb.py  # VoxCeleb 데이터셋 다운로드
-│       └── ecapa_tdnn.py         # ECAPA-TDNN 모델 구현
-├── sample_datasets/              # 생성된 샘플 데이터셋
-│   ├── train/                    # 학습 데이터
-│   └── test/                     # 테스트 데이터
-└── models/                       # 학습된 모델 저장소
+├── data/
+│   └── sample_dataset/     # 생성된 샘플 데이터셋
+├── models/                 # 학습된 모델 저장
+└── src/
+    └── metaverse_voice_recognition/
+        ├── __init__.py
+        ├── dataset.py      # 데이터셋 클래스
+        ├── ecapa_tdnn.py   # ECAPA-TDNN 모델
+        ├── generate_sample_dataset.py  # 샘플 데이터셋 생성
+        ├── train.py        # 모델 학습
+        ├── test.py         # 모델 테스트
+        └── main.py         # 메인 실행 파일
 ```
 
-## 참고사항
+## 주의사항
 
-- 학습 중에는 자동으로 `models` 디렉토리에 체크포인트가 저장됩니다.
-- 검증 정확도가 향상되지 않으면 조기 종료됩니다.
-- GPU가 있는 경우 자동으로 GPU를 사용합니다.
+- 샘플 데이터셋은 테스트 목적으로만 사용됩니다.
+- 실제 사용을 위해서는 더 큰 데이터셋이 필요합니다.
+- GPU가 있다면 더 빠른 학습이 가능합니다.

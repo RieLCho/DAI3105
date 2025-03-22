@@ -3,42 +3,39 @@ from typing import Optional
 
 @dataclass
 class ModelConfig:
-    """ECAPA-TDNN 모델 설정"""
-    input_size: int = 80
+    """모델 설정"""
+    embedding_dim: int = 192
     channels: int = 512
-    emb_dim: int = 192
+    kernel_size: int = 5
+    stride: int = 1
+    padding: int = 2
+    dilation: int = 1
+    groups: int = 1
 
 @dataclass
 class TrainingConfig:
     """학습 설정"""
-    # 데이터 관련
     train_dir: str
     val_dir: Optional[str] = None
-    batch_size: int = 32
-    num_workers: int = 4
-    
-    # 학습 관련
-    num_epochs: int = 50
+    save_dir: str = 'models'
+    num_epochs: int = 5
+    batch_size: int = 16
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
-    scheduler_step_size: int = 10
-    scheduler_gamma: float = 0.5
-    
-    # 손실 함수 관련
     margin: float = 0.2
     scale: float = 30
+    scheduler_step_size: int = 10
+    scheduler_gamma: float = 0.1
+    num_workers: int = 4
+    augment: bool = True
+    save_interval: int = 1  # 모델 저장 간격 (에폭 단위)
     
     # 데이터 증강 관련
-    augment: bool = True
     noise_prob: float = 0.5
     noise_snr_range: tuple = (5, 15)
     rir_prob: float = 0.5
     speed_perturb_prob: float = 0.5
     speed_perturb_range: tuple = (0.9, 1.1)
-    
-    # 모델 저장 관련
-    save_dir: str = 'models'
-    save_interval: int = 10
     
     # 검증 관련
     val_interval: int = 1
@@ -81,9 +78,13 @@ DEFAULT_TRAIN_CONFIG = TrainingConfig(
 )
 
 DEFAULT_MODEL_CONFIG = ModelConfig(
-    input_size=80,
+    embedding_dim=192,
     channels=512,
-    emb_dim=192,
+    kernel_size=5,
+    stride=1,
+    padding=2,
+    dilation=1,
+    groups=1,
 )
 
 DEFAULT_INFERENCE_CONFIG = InferenceConfig(

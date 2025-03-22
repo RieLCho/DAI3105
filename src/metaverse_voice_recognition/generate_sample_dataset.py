@@ -5,6 +5,8 @@ import torchaudio
 import random
 from pathlib import Path
 from typing import List, Tuple
+import soundfile as sf
+import argparse
 
 def generate_voice_sample(
     duration: float = 3.0,
@@ -159,26 +161,57 @@ def create_sample_dataset(
         )
         torchaudio.save(noise_dir / f'pink_noise_{i:03d}.wav', pink_noise, sample_rate)
 
+def generate_sample_dataset(output_dir: str, num_speakers: int = 5, samples_per_speaker: int = 10):
+    """샘플 데이터셋을 생성합니다."""
+    # 출력 디렉토리 생성
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 각 화자별 디렉토리 생성
+    for speaker_id in range(num_speakers):
+        speaker_dir = output_dir / f"speaker_{speaker_id:03d}"
+        speaker_dir.mkdir(exist_ok=True)
+        
+        # 각 화자별 샘플 생성
+        for sample_id in range(samples_per_speaker):
+            # 1초 길이의 랜덤 음성 생성 (16kHz 샘플링 레이트)
+            duration = 1.0  # 초
+            sample_rate = 16000
+            t = np.linspace(0, duration, int(sample_rate * duration))
+            
+            # 기본 주파수 (화자마다 다르게)
+            base_freq = 100 + speaker_id * 20
+            
+            # 음성 생성 (여러 주파수의 조합)
+            signal = np.zeros_like(t)
+            for freq in [base_freq, base_freq * 2, base_freq * 3]:
+                signal += np.sin(2 * np.pi * freq * t)
+            
+            # 노이즈 추가
+            noise = np.random.normal(0, 0.1, len(signal))
+            signal = signal + noise
+            
+            # 정규화
+            signal = signal / np.max(np.abs(signal))
+            
+            # 파일 저장
+            output_file = speaker_dir / f"sample_{sample_id:03d}.wav"
+            sf.write(output_file, signal, sample_rate)
+    
+    print(f"샘플 데이터셋 생성 완료! ({num_speakers}명의 화자, 각 {samples_per_speaker}개 샘플)")
+
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="샘플 음성 데이터셋 생성")
-    parser.add_argument("--output_dir", type=str, required=True, help="출력 디렉토리")
-    parser.add_argument("--num_speakers", type=int, default=10, help="화자 수")
-    parser.add_argument("--samples_per_speaker", type=int, default=20, help="화자당 샘플 수")
-    parser.add_argument("--duration", type=float, default=3.0, help="각 샘플의 길이(초)")
-    parser.add_argument("--sample_rate", type=int, default=16000, help="샘플링 레이트")
+    parser = argparse.ArgumentParser(description='샘플 데이터셋 생성')
+    parser.add_argument('--output_dir', type=str, default='data/sample_dataset',
+                      help='데이터셋 저장 경로')
+    parser.add_argument('--num_speakers', type=int, default=5,
+                      help='생성할 화자 수')
+    parser.add_argument('--samples_per_speaker', type=int, default=10,
+                      help='화자당 샘플 수')
     
     args = parser.parse_args()
     
-    print("샘플 데이터셋 생성 중...")
-    create_sample_dataset(
-        args.output_dir,
-        args.num_speakers,
-        args.samples_per_speaker,
-        args.duration,
-        args.sample_rate
-    )
-    print("완료!")
+    generate_sample_dataset(args.output_dir, args.num_speakers, args.samples_per_speaker)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main() 
