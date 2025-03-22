@@ -6,9 +6,15 @@ from torch.utils.data import DataLoader
 from typing import Optional, Tuple
 import numpy as np
 from tqdm import tqdm
+from pathlib import Path
 
 from metaverse_voice_recognition.dataset import VoxCelebDataset
 from metaverse_voice_recognition.ecapa_tdnn import ECAPA_TDNN
+from metaverse_voice_recognition.config import ModelConfig, TrainingConfig
+
+def count_parameters(model: nn.Module) -> int:
+    """모델의 학습 가능한 파라미터 수를 반환합니다."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 class AAMSoftmax(nn.Module):
     """Additive Angular Margin Softmax 손실 함수"""
@@ -62,7 +68,9 @@ def train_epoch(
     train_loader: DataLoader,
     criterion: AAMSoftmax,
     optimizer: optim.Optimizer,
-    device: torch.device
+    device: torch.device,
+    epoch: int,
+    total_epochs: int
 ) -> Tuple[float, float]:
     """한 에폭 동안 모델을 학습합니다."""
     model.train()
@@ -70,7 +78,12 @@ def train_epoch(
     correct = 0
     total = 0
     
-    progress_bar = tqdm(train_loader, desc='Training')
+    progress_bar = tqdm(
+        train_loader,
+        desc=f'Epoch {epoch}/{total_epochs} [Train]',
+        leave=False
+    )
+    
     for batch_idx, (anchors, positives, labels) in enumerate(progress_bar):
         # 데이터를 GPU로 이동
         anchors = anchors.to(device)
@@ -126,7 +139,9 @@ def validate(
     model: ECAPA_TDNN,
     val_loader: DataLoader,
     criterion: AAMSoftmax,
-    device: torch.device
+    device: torch.device,
+    epoch: int,
+    total_epochs: int
 ) -> Tuple[float, float]:
     """검증 세트에서 모델을 평가합니다."""
     model.eval()
@@ -135,7 +150,12 @@ def validate(
     total = 0
     
     with torch.no_grad():
-        progress_bar = tqdm(val_loader, desc='Validating')
+        progress_bar = tqdm(
+            val_loader,
+            desc=f'Epoch {epoch}/{total_epochs} [Valid]',
+            leave=False
+        )
+        
         for batch_idx, (anchors, positives, labels) in enumerate(progress_bar):
             anchors = anchors.to(device)
             positives = positives.to(device)
@@ -150,8 +170,18 @@ def validate(
             
             running_loss += loss.item()
             
-            _, anchor_predicted = torch.max(anchor_loss.data, 1)
-            _, positive_predicted = torch.max(positive_loss.data, 1)
+            # 정확도 계산
+            anchor_output = nn.functional.linear(
+                nn.functional.normalize(anchor_embeddings, p=2, dim=1),
+                nn.functional.normalize(criterion.weight, p=2, dim=1)
+            ) * criterion.scale
+            positive_output = nn.functional.linear(
+                nn.functional.normalize(positive_embeddings, p=2, dim=1),
+                nn.functional.normalize(criterion.weight, p=2, dim=1)
+            ) * criterion.scale
+            
+            _, anchor_predicted = torch.max(anchor_output, 1)
+            _, positive_predicted = torch.max(positive_output, 1)
             total += labels.size(0) * 2
             correct += (anchor_predicted == labels).sum().item()
             correct += (positive_predicted == labels).sum().item()
@@ -166,90 +196,112 @@ def validate(
     
     return val_loss, val_acc
 
-def train_model(
-    train_dir: str,
-    val_dir: Optional[str] = None,
-    num_epochs: int = 50,
-    batch_size: int = 32,
-    learning_rate: float = 0.001,
-    save_dir: str = 'models'
-) -> ECAPA_TDNN:
+def train_model(config: TrainingConfig) -> ECAPA_TDNN:
     """ECAPA-TDNN 모델을 학습합니다."""
     # 장치 설정
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
     
     # 데이터셋 및 데이터로더 생성
-    train_dataset = VoxCelebDataset(train_dir, augment=True)
+    train_dataset = VoxCelebDataset(config.train_dir, augment=config.augment)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=config.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=config.num_workers,
         collate_fn=VoxCelebDataset.collate_fn
     )
     
-    if val_dir:
-        val_dataset = VoxCelebDataset(val_dir, augment=False)
+    if config.val_dir:
+        val_dataset = VoxCelebDataset(config.val_dir, augment=False)
         val_loader = DataLoader(
             val_dataset,
-            batch_size=batch_size,
+            batch_size=config.batch_size,
             shuffle=False,
-            num_workers=4,
+            num_workers=config.num_workers,
             collate_fn=VoxCelebDataset.collate_fn
         )
     
-    # 모델, 손실 함수, 옵티마이저 초기화
+    # 모델 초기화
     model = ECAPA_TDNN().to(device)
+    print(f'모델 파라미터 수: {count_parameters(model):,}')
+    
+    # 손실 함수, 옵티마이저 초기화
     criterion = AAMSoftmax(
         embedding_dim=192,
-        num_speakers=len(train_dataset.speakers)
+        num_speakers=len(train_dataset.speakers),
+        margin=config.margin,
+        scale=config.scale
     ).to(device)
+    
     optimizer = optim.Adam(
         list(model.parameters()) + list(criterion.parameters()),
-        lr=learning_rate
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay
     )
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    
+    scheduler = optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=config.scheduler_step_size,
+        gamma=config.scheduler_gamma
+    )
     
     # 체크포인트 디렉토리 생성
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = Path(config.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
     
     best_val_acc = 0.0
-    for epoch in range(num_epochs):
-        print(f'\nEpoch {epoch+1}/{num_epochs}')
-        
+    patience_counter = 0
+    
+    print("\n학습 시작...")
+    for epoch in range(config.num_epochs):
         # 학습
         train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, criterion, optimizer, device,
+            epoch + 1, config.num_epochs
         )
+        print(f'\nEpoch {epoch+1}/{config.num_epochs}')
         print(f'Training Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%')
         
         # 검증
-        if val_dir:
-            val_loss, val_acc = validate(model, val_loader, criterion, device)
+        if config.val_dir and (epoch + 1) % config.val_interval == 0:
+            val_loss, val_acc = validate(
+                model, val_loader, criterion, device,
+                epoch + 1, config.num_epochs
+            )
             print(f'Validation Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%')
             
-            # 최고 성능 모델 저장
+            # 조기 종료 확인
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
+                patience_counter = 0
+                
+                # 최고 성능 모델 저장
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_acc': val_acc,
-                }, os.path.join(save_dir, 'best_model.pth'))
+                }, save_dir / 'best_model.pth')
+            else:
+                patience_counter += 1
+                if patience_counter >= config.early_stopping_patience:
+                    print(f'\n{config.early_stopping_patience}번 동안 성능 향상이 없어 학습을 조기 종료합니다.')
+                    break
         
         # 학습률 조정
         scheduler.step()
         
-        # 현재 모델 저장
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_acc': train_acc,
-        }, os.path.join(save_dir, f'model_epoch_{epoch+1}.pth'))
+        # 주기적으로 모델 저장
+        if (epoch + 1) % config.save_interval == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_acc': train_acc,
+            }, save_dir / f'model_epoch_{epoch+1}.pth')
     
+    print("\n학습 완료!")
     return model
 
 if __name__ == '__main__':
@@ -265,11 +317,13 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    model = train_model(
+    config = TrainingConfig(
         train_dir=args.train_dir,
         val_dir=args.val_dir,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         save_dir=args.save_dir
-    ) 
+    )
+    
+    model = train_model(config) 
